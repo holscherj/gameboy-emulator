@@ -2,10 +2,17 @@
 #include <iostream>
 #include <cstring>
 
+// register flags
 #define FLAG_Z 7
 #define FLAG_N 6
 #define FLAG_H 5
 #define FLAG_C 4
+
+// timer defintions
+#define TIMA 0xFF05
+#define TMA 0xFF06
+#define TMC 0xFF07
+#define CLOCKSPEED 4194304
 
 Emulator::Emulator() {
     // initializing starting state
@@ -75,6 +82,12 @@ Emulator::Emulator() {
     m_EnableRAM = false;
     memset(&m_RAMBanks, 0, sizeof(m_RAMBanks));
     m_CurrentRAMBank = 0;
+
+    // initialize timer
+    int frequency = 4096;
+    m_TimerCounter = CLOCKSPEED / frequency;
+    m_DividerCounter = 0;
+    m_DividerRegister = 0;
 }
 
 /**
@@ -114,6 +127,17 @@ void Emulator::WriteMemory(WORD address, BYTE data) {
         WriteMemory(address - 0x2000, data);
     } else if((address >= 0xFEA0) && (address < 0xFEFF)) {
         // this area is restricted
+    } else if(TMC == address) {
+        BYTE currentFreq = GetClockFreq();
+        m_CartridgeMemory[TMC] = data;
+        BYTE newFreq = GetClockFreq();
+
+        if(currentFreq != newFreq) {
+            SetClockFreq();
+        }
+    } else if(0xFF04 == address) {
+        // trap the divider register
+        m_Rom[0xFF04] = 0;
     } else {
         m_Rom[address] = data;
     }
@@ -227,9 +251,73 @@ void Emulator::DoRAMBankChange(BYTE data) {
     m_CurrentRAMBank = data & 0x3;
 }
 
+/**
+ * Selecting rom or ram banking mode
+ */
 void Emulator::DoChangeROMRAMMode(BYTE data) {
     BYTE newData = data & 0x1;
     m_ROMBanking = (newData == 0) ? true : false;
     if(m_ROMBanking)
         m_CurrentRAMBank = 0;
+}
+
+/**
+ * Update the timers
+ */
+void Emulator::UpdateTimers(int cycles) {
+    DoDividerRegister(cycles);
+
+    // the clock must be enabled to update the clock
+    if(IsClockEnabled()) {
+        m_TimerCounter -= cycles;
+
+        // enough cpu clock cycles have happened to update the timer
+        if(m_TimerCounter <= 0) {
+            // reset m_TimerTracer to the correct value
+            SetClockFreq();
+
+            // timer about to overflow
+            if(ReadMemory(TIMA) == 255) {
+                WriteMemory(TIMA, ReadMemory(TMA));
+                // RequestInterupt(2);
+            } else {
+                WriteMemory(TIMA, ReadMemory(TIMA) + 1);
+            }
+        }
+    }
+}
+
+/**
+ * Check if timer is enabled
+ */
+bool Emulator::IsClockEnabled() const {
+    return TestBit(ReadMemory(TMC), 2) ? true : false;
+}
+
+/**
+ * Getter for the clock's frequency
+ */
+BYTE Emulator::GetClockFreq() const {
+    return ReadMemory(TMC) & 0x3;
+}
+
+/**
+ * Setter for the clock's frequency
+ */
+void Emulator::SetClockFreq() {
+    BYTE freq = GetClockFreq();
+    switch(freq) {
+        case 0: m_TimerCounter = 1024; break; // freq 4096
+        case 1: m_TimerCounter = 16; break; // freq 262144
+        case 2: m_TimerCounter = 64; break; // freq 65536
+        case 3: m_TimerCounter = 256; break; // freq 16382
+    }
+}
+
+void Emulator::DoDividerRegister(int cycles) {
+    m_DividerRegister += cycles;
+    if(m_DividerCounter >= 255) {
+        m_DividerCounter = 0;
+        m_Rom[0xFF04]++;
+    }
 }

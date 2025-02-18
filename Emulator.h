@@ -19,6 +19,11 @@ class Emulator {
         void DoChangeHiRomBank(BYTE data);
         void DoRAMBankChange(BYTE data);
         void DoChangeROMRAMMode(BYTE data);
+        void UpdateTimers(int cylces);
+        bool IsClockEnabled() const;
+        BYTE GetClockFreq() const;
+        void SetClockFreq();
+        void DoDividerRegister(int cycles);
         ~Emulator() = default;
 
         // game cartridge memory
@@ -58,6 +63,11 @@ class Emulator {
         bool m_EnableRAM;
         BYTE m_RAMBanks[0x8000];
         BYTE m_CurrentRAMBank;
+
+        // timer
+        int m_TimerCounter;
+        int m_DividerCounter;
+        int m_DividerRegister;
 
     private:
 };

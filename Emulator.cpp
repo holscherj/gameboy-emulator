@@ -80,6 +80,7 @@ Emulator::Emulator() {
     m_CurrentROMBank = 1;
 
     // initialize ram banking
+    m_UsingMemoryModel16_8 = true;
     m_EnableRAM = false;
     memset(&m_RAMBanks, 0, sizeof(m_RAMBanks));
     m_CurrentRAMBank = 0;
@@ -89,31 +90,40 @@ Emulator::Emulator() {
     m_TimerCounter = CLOCKSPEED / frequency;
     m_DividerCounter = 0;
     m_DividerRegister = 0;
+    m_CurrentClockSpeed = 1024;
+    m_CyclesThisUpdate = 0;
+    m_Halted = false;
 
     // initialize interrupts
-    m_InterruptMaster = true;
+    m_InterruptMaster = false;
+    m_PendingInteruptDisabled = false;
+    m_PendingInteruptEnabled = false;
 
     // initialize scanline
     m_ScanlineCounter = 0;
+
+    // joypad
+    m_JoypadState = 0xFF;
+
 }
 
 /**
  * Emulation loop
  */
-// void Emulator::Update() {
-//     const int MAX_CYCLES = 69905;
-//     int cyclesThisUpdate = 0;
+void Emulator::Update() {
+    const int MAX_CYCLES = 69905;
+    int cyclesThisUpdate = 0;
 
-//     while(cyclesThisUpdate < MAX_CYCLES) {
-//         int cycles = ExecuteNextOpcode();
-//         cyclesThisUpdate += cycles;
-//         UpdateTimers(cycles);
-//         UpdateGraphics(cycles);
-//         DoInterrupts();
-//     }
+    while(cyclesThisUpdate < MAX_CYCLES) {
+        int cycles = ExecuteNextOpcode();
+        cyclesThisUpdate += cycles;
+        UpdateTimers(cycles);
+        UpdateGraphics(cycles);
+        DoInterrupts();
+    }
 
-//     RenderScreen();
-// }
+    // RenderScreen();
+}
 
 /**
  * Safely write to available memory
@@ -167,6 +177,8 @@ BYTE Emulator::ReadMemory(WORD address) const {
         // reading from ram memory bank
         WORD newAddress = address - 0xA000;
         return m_RAMBanks[newAddress + (m_CurrentRAMBank * 0x2000)];
+    } else if(0xFF00 == address) {
+        return GetJoypadState();
     }
 
     // else, return memory
@@ -359,22 +371,22 @@ void Emulator::DoInterrupts() {
 /**
  * Process the current interrupt
  */
-// void Emulator::ServiceInterrupt(int interrupt) {
-//     m_InterruptMaster = false;
-//     BYTE req = ReadMemory(0xFF0F);
-//     req = BitReset(req, interrupt);
-//     WriteMemory(0xFF0F, req);
+void Emulator::ServiceInterrupt(int interrupt) {
+    m_InterruptMaster = false;
+    BYTE req = ReadMemory(0xFF0F);
+    req = BitReset(req, interrupt);
+    WriteMemory(0xFF0F, req);
 
-//     // we must save the current execution address by pushing it onto the stack
-//     PushWordOntoStack(m_ProgramCounter);
+    // we must save the current execution address by pushing it onto the stack
+    PushWordOntoStack(m_ProgramCounter);
 
-//     switch(interrupt) {
-//         case 0: m_ProgramCounter = 0x40; break;
-//         case 1: m_ProgramCounter = 0x48; break;
-//         case 2: m_ProgramCounter = 0x50; break;
-//         case 4: m_ProgramCounter = 0x60; break;
-//     }
-// }
+    switch(interrupt) {
+        case 0: m_ProgramCounter = 0x40; break;
+        case 1: m_ProgramCounter = 0x48; break;
+        case 2: m_ProgramCounter = 0x50; break;
+        case 4: m_ProgramCounter = 0x60; break;
+    }
+}
 
 /**
  * Update the graphics
@@ -752,4 +764,547 @@ Emulator::COLOR Emulator::GetColor(BYTE colorNum, WORD address) const {
    }
 
    return res;
+}
+
+void Emulator::KeyPressed(int key) {
+    bool previouslyUnset = false;
+
+    // if setting from 1 to 0 we may have to request an interrupt
+    if(TestBit(m_JoypadState, key) == false)
+        previouslyUnset = true;
+    
+    // remember if a keypressed its bit is 0 not 1
+    m_JoypadState = BitReset(m_JoypadState, key);
+
+    // button pressed
+    bool button = true;
+
+    // is this a standard button or a directional button?
+    if(key > 3)
+        button = true;
+    else // directional button
+        button = false;
+
+    BYTE keyReq = m_Rom[0xFF00];
+    bool requestInterrupt = false;
+
+    // only request interrupt if the button just pressed
+    // is the style of the button the game is interested in
+    if(button && !TestBit(keyReq, 5))
+        requestInterrupt = true;
+    else if(!button && !TestBit(keyReq, 4))
+        requestInterrupt = true;
+    
+    // request interrupt
+    if(requestInterrupt && !previouslyUnset)
+        RequestInterrupt(4);
+}
+
+/**
+ * Reset joypad state on key released
+ */
+void Emulator::KeyReleased(int key) {
+    m_JoypadState = BitSet(m_JoypadState, key);
+}
+
+/**
+ * Get current joypad state
+ */
+BYTE Emulator::GetJoypadState() const {
+    BYTE res = m_Rom[0xFF00];
+    // flip all the bits
+    res ^= 0xFF;
+
+    // are we interested in the standard buttons?
+    if(!TestBit(res, 4)) {
+        BYTE topJoypad = m_JoypadState >> 4;
+        topJoypad |= 0xF0; // turn the top 4 bits on
+        res &= topJoypad; // show what buttons are pressed
+    } else if(!TestBit(res, 5)) {
+        // directional buttons
+        BYTE bottomJoypad = m_JoypadState & 0xF;
+        bottomJoypad |= 0xF0;
+        res &= bottomJoypad;
+    }
+
+    return res;
+}
+
+/**
+ * Execute next opcode in memory
+ */
+BYTE Emulator::ExecuteNextOpcode( )
+{
+
+	BYTE opcode = m_Rom[m_ProgramCounter] ;
+
+	if ((m_ProgramCounter >= 0x4000 && m_ProgramCounter <= 0x7FFF) || (m_ProgramCounter >= 0xA000 && m_ProgramCounter <= 0xBFFF))
+		opcode = ReadMemory(m_ProgramCounter) ;
+
+	if (!m_Halted)
+	{
+		m_ProgramCounter++ ;
+		m_TotalOpcodes++ ;
+
+		ExecuteOpcode( opcode ) ;
+
+
+	}
+	else
+	{
+		m_CyclesThisUpdate += 4;
+	}
+
+	// we are trying to disable interupts, however interupts get disabled after the next instruction
+	// 0xF3 is the opcode for disabling interupt
+	if (m_PendingInteruptDisabled)
+	{
+		if (ReadMemory(m_ProgramCounter-1) != 0xF3)
+		{
+			m_PendingInteruptDisabled = false ;
+			m_InterruptMaster = false ;
+		}
+	}
+
+	if (m_PendingInteruptEnabled)
+	{
+		if (ReadMemory(m_ProgramCounter-1) != 0xFB)
+		{
+			m_PendingInteruptEnabled = false ;
+			m_InterruptMaster = true ;
+		}
+	}
+
+	return opcode ;
+
+}
+
+/**
+ * 8bit loads
+ */
+void Emulator::CPU_8BIT_LOAD( BYTE& reg ) {
+    BYTE n = ReadMemory(m_ProgramCounter);
+    m_ProgramCounter++;
+    reg = n;
+}
+
+/**
+ * 8bit adds
+ */
+void Emulator::CPU_8BIT_ADD(BYTE &reg, BYTE toAdd, int cycles, bool useImmediate, bool addCarry)
+{
+    BYTE before = reg;
+    BYTE adding = 0;
+
+    // are we adding immediate data or the second param?
+    if (useImmediate) {
+        BYTE n = ReadMemory(m_ProgramCounter);
+        m_ProgramCounter++;
+        adding = n;
+    } else {
+        adding = toAdd;
+    }
+
+    // are we also adding the carry flag?
+    if (addCarry) {
+        if (TestBit(m_RegisterAF.lo, FLAG_C))
+            adding++;
+    }
+
+    reg += adding;
+
+    // set the flags
+    m_RegisterAF.lo = 0;
+
+    if (reg == 0)
+        m_RegisterAF.lo = BitSet(m_RegisterAF.lo, FLAG_Z);
+
+    WORD htest = (before & 0xF);
+    htest += (adding & 0xF);
+
+    if (htest > 0xF)
+        m_RegisterAF.lo = BitSet(m_RegisterAF.lo, FLAG_H);
+
+    if ((before + adding) > 0xFF)
+        m_RegisterAF.lo = BitSet(m_RegisterAF.lo, FLAG_C);
+}
+
+/**
+ * 8bit subs
+ */
+void Emulator::CPU_8BIT_SUB(BYTE &reg, BYTE subtracting, int cycles, bool useImmediate, bool subCarry)
+{
+    BYTE before = reg;
+    BYTE toSubtract = 0;
+
+    if (useImmediate) {
+        BYTE n = ReadMemory(m_ProgramCounter);
+        m_ProgramCounter++;
+        toSubtract = n;
+    } else {
+        toSubtract = subtracting;
+    }
+
+    if (subCarry) {
+        if (TestBit(m_RegisterAF.lo, FLAG_C))
+            toSubtract++;
+    }
+
+    reg -= toSubtract;
+    m_RegisterAF.lo = 0;
+
+    if (reg == 0)
+        m_RegisterAF.lo = BitSet(m_RegisterAF.lo, FLAG_Z);
+
+    m_RegisterAF.lo = BitSet(m_RegisterAF.lo, FLAG_N);
+
+    // set if no borrow
+    if (before < toSubtract)
+        m_RegisterAF.lo = BitSet(m_RegisterAF.lo, FLAG_C);
+
+    SIGNED_WORD htest = (before & 0xF);
+    htest -= (toSubtract & 0xF);
+
+    if (htest < 0)
+        m_RegisterAF.lo = BitSet(m_RegisterAF.lo, FLAG_H);
+}
+
+/**
+ * 8bit xor
+ */
+void Emulator::CPU_8BIT_XOR(BYTE& reg, BYTE toXOr, int cycles, bool useImmediate) {
+    BYTE myxor = 0;
+
+    if(useImmediate) {
+        BYTE n = ReadMemory(m_ProgramCounter);
+        m_ProgramCounter++;
+        myxor = n;
+    } else {
+        myxor = toXOr;
+    }
+
+    reg ^= myxor;
+    m_RegisterAF.lo = 0;
+
+    if(reg == 0)
+        m_RegisterAF.lo = BitSet(m_RegisterAF.lo, FLAG_Z);
+}
+
+/**
+ * 8bit jumps
+ */
+
+void Emulator::CPU_JUMP_IMMEDIATE(bool useCondition, int flag, bool condition)
+{
+    SIGNED_BYTE n = (SIGNED_BYTE)ReadMemory(m_ProgramCounter);
+
+    if (!useCondition) {
+        m_ProgramCounter += n;
+    }
+    else if (TestBit(m_RegisterAF.lo, flag) == condition) {
+        m_ProgramCounter += n;
+    }
+
+    m_ProgramCounter++;
+}
+
+/**
+ * Calls
+ */
+void Emulator::CPU_CALL(bool useCondition, int flag, bool condition)
+{
+   WORD nn = ReadWord( ) ;
+   m_ProgramCounter += 2;
+
+   if (!useCondition)
+   {
+     PushWordOntoStack(m_ProgramCounter) ;
+     m_ProgramCounter = nn ;
+     return ;
+   }
+
+   if (TestBit(m_RegisterAF.lo, flag)==condition)
+   {
+     PushWordOntoStack(m_ProgramCounter) ;
+     m_ProgramCounter = nn ;
+   }
+}
+
+WORD Emulator::PopWordOffStack( )
+{
+	WORD word = ReadMemory(m_StackPointer.reg+1) << 8 ;
+	word |= ReadMemory(m_StackPointer.reg) ;
+	m_StackPointer.reg+=2 ;
+
+	return word ;
+}
+
+/**
+ * Returns
+ */
+void Emulator::CPU_RETURN(bool useCondition, int flag, bool condition) {
+    if(!useCondition) {
+        m_ProgramCounter = PopWordOffStack();
+        return;
+    }
+
+    if(TestBit(m_RegisterAF.lo, flag) == condition) {
+        m_ProgramCounter = PopWordOffStack();
+    }
+}
+
+/**
+ * Rotate right through carry
+ */
+void Emulator::CPU_RRC(BYTE &reg)
+{
+    bool isLSBSet = TestBit(reg, 0);
+
+    m_RegisterAF.lo = 0;
+
+    reg >>= 1;
+
+    if (isLSBSet)
+    {
+        m_RegisterAF.lo = BitSet(m_RegisterAF.lo, FLAG_C);
+        reg = BitSet(reg, 7);
+    }
+    if (reg == 0)
+        m_RegisterAF.lo = BitSet(m_RegisterAF.lo, FLAG_Z);
+}
+
+/**
+ * CPU test bit
+ */
+void Emulator::CPU_TEST_BIT(BYTE reg, int bit, int cycles)
+{
+    if (TestBit(reg, bit))
+        m_RegisterAF.lo = BitReset(m_RegisterAF.lo, FLAG_Z);
+    else
+        m_RegisterAF.lo = BitSet(m_RegisterAF.lo, FLAG_Z);
+
+    m_RegisterAF.lo = BitReset(m_RegisterAF.lo, FLAG_N);
+    m_RegisterAF.lo = BitSet(m_RegisterAF.lo, FLAG_H);
+}
+
+void Emulator::WriteByte(WORD address, BYTE data)
+{
+	// writing to memory address 0x0 to 0x1FFF this disables writing to the ram bank. 0 disables, 0xA enables
+	if (address <= 0x1FFF)
+	{
+	    if (m_MBC1)
+	    {
+            if ((data & 0xF) == 0xA)
+                m_EnableRAM = true ;
+            else if (data == 0x0)
+                m_EnableRAM = false ;
+	    }
+	    else if (m_MBC2)
+	    {
+        //bit 0 of upper byte must be 0
+	     if (false == TestBit(address,8))
+	     {
+	         if ((data & 0xF) == 0xA)
+                m_EnableRAM = true ;
+            else if (data == 0x0)
+                m_EnableRAM = false ;
+	     }
+	    }
+
+	}
+
+	// if writing to a memory address between 2000 and 3FFF then we need to change rom bank
+	else if ( (address >= 0x2000) && (address <= 0x3FFF) )
+	{
+		if (m_MBC1)
+		{
+			if (data == 0x00)
+				data++;
+
+			data &= 31;
+
+			// Turn off the lower 5-bits.
+			m_CurrentROMBank &= 224;
+
+			// Combine the written data with the register.
+			m_CurrentROMBank |= data;
+
+		}
+		else if (m_MBC2)
+		{
+            data &= 0xF ;
+            m_CurrentROMBank = data ;
+		}
+	}
+
+	// writing to address 0x4000 to 0x5FFF switches ram banks (if enabled of course)
+	else if ( (address >= 0x4000) && (address <= 0x5FFF))
+	{
+		if (m_MBC1)
+		{
+			// are we using memory model 16/8
+			if (m_UsingMemoryModel16_8)
+			{
+				// in this mode we can only use Ram Bank 0
+				m_CurrentRAMBank = 0 ;
+
+				data &= 3;
+				data <<= 5;
+
+				if ((m_CurrentROMBank & 31) == 0)
+				{
+					data++;
+				}
+
+				// Turn off bits 5 and 6, and 7 if it somehow got turned on.
+				m_CurrentROMBank &= 31;
+
+				// Combine the written data with the register.
+				m_CurrentROMBank |= data;
+			}
+			else
+			{
+				m_CurrentRAMBank = data & 0x3 ;
+			}
+		}
+	}
+
+	// writing to address 0x6000 to 0x7FFF switches memory model
+	else if ( (address >= 0x6000) && (address <= 0x7FFF))
+	{
+		if (m_MBC1)
+		{
+			// we're only interested in the first bit
+			data &= 1 ;
+			if (data == 1)
+			{
+				m_CurrentRAMBank = 0 ;
+				m_UsingMemoryModel16_8 = false ;
+			}
+			else
+				m_UsingMemoryModel16_8 = true ;
+		}
+	}
+
+	// from now on we're writing to RAM
+
+ 	else if ((address >= 0xA000) && (address <= 0xBFFF))
+ 	{
+ 		if (m_EnableRAM)
+ 		{
+ 		    if (m_MBC1)
+ 		    {
+                WORD newAddress = address - 0xA000 ;
+                m_RAMBanks[newAddress + (m_CurrentRAMBank * 0x2000)] = data;
+ 		    }
+ 		}
+ 		else if (m_MBC2 && (address < 0xA200))
+ 		{
+ 		    WORD newAddress = address - 0xA000 ;
+            m_RAMBanks[newAddress + (m_CurrentRAMBank * 0x2000)] = data;
+ 		}
+
+ 	}
+
+
+	// we're right to internal RAM, remember that it needs to echo it
+	else if ( (address >= 0xC000) && (address <= 0xDFFF) )
+	{
+		m_Rom[address] = data ;
+	}
+
+	// echo memory. Writes here and into the internal ram. Same as above
+	else if ( (address >= 0xE000) && (address <= 0xFDFF) )
+	{
+		m_Rom[address] = data ;
+		m_Rom[address -0x2000] = data ; // echo data into ram address
+	}
+
+	// This area is restricted.
+ 	else if ((address >= 0xFEA0) && (address <= 0xFEFF))
+ 	{
+ 	}
+
+	// reset the divider register
+	else if (address == 0xFF04)
+	{
+		m_Rom[0xFF04] = 0 ;
+		m_DividerCounter = 0 ;
+	}
+
+	// not sure if this is correct
+	else if (address == 0xFF07)
+	{
+		m_Rom[address] = data ;
+
+		int timerVal = data & 0x03 ;
+
+		int clockSpeed = 0 ;
+
+		switch(timerVal)
+		{
+			case 0: clockSpeed = 1024 ; break ;
+			case 1: clockSpeed = 16; break ;
+			case 2: clockSpeed = 64 ;break ;
+			case 3: clockSpeed = 256 ;break ; // 256
+			default: assert(false); break ; // weird timer val
+		}
+
+		if (clockSpeed != m_CurrentClockSpeed)
+		{
+			m_TimerCounter = 0 ;
+			m_CurrentClockSpeed = clockSpeed ;
+		}
+	}
+
+
+	// FF44 shows which horizontal scanline is currently being draw. Writing here resets it
+	else if (address == 0xFF44)
+	{
+		m_Rom[0xFF44] = 0 ;
+	}
+
+	else if (address == 0xFF45)
+	{
+		m_Rom[address] = data ;
+	}
+	// DMA transfer
+	else if (address == 0xFF46)
+	{
+	    WORD newAddress = (data << 8) ;
+		for (int i = 0; i < 0xA0; i++)
+		{
+			m_Rom[0xFE00 + i] = ReadMemory(newAddress + i);
+		}
+	}
+
+	// This area is restricted.
+ 	else if ((address >= 0xFF4C) && (address <= 0xFF7F))
+ 	{
+ 	}
+
+
+	// I guess we're ok to write to memory... gulp
+	else
+	{
+		m_Rom[address] = data ;
+	}
+}
+
+void Emulator::PushWordOntoStack(WORD word)
+{
+	BYTE hi = word >> 8 ;
+	BYTE lo = word & 0xFF;
+	m_StackPointer.reg-- ;
+	WriteByte(m_StackPointer.reg, hi) ;
+	m_StackPointer.reg-- ;
+	WriteByte(m_StackPointer.reg, lo) ;
+}
+
+WORD Emulator::ReadWord() const
+{
+    WORD res = ReadMemory(m_ProgramCounter + 1);
+    res = res << 8;
+    res |= ReadMemory(m_ProgramCounter);
+    return res;
 }

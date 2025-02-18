@@ -24,6 +24,13 @@ class Emulator {
         BYTE GetClockFreq() const;
         void SetClockFreq();
         void DoDividerRegister(int cycles);
+        void RequestInterrupt(int id);
+        void DoInterrupts();
+        void ServiceInterrupt(int interrupt);
+        void UpdateGraphics(int cycles);
+        void SetLCDStatus();
+        bool IsLCDEnabled() const;
+        void DoDMATransfer(BYTE data);
         ~Emulator() = default;
 
         // game cartridge memory
@@ -68,6 +75,12 @@ class Emulator {
         int m_TimerCounter;
         int m_DividerCounter;
         int m_DividerRegister;
+
+        // interrupts
+        bool m_InterruptMaster;
+
+        // scanlines
+        int m_ScanlineCounter;
 
     private:
 };

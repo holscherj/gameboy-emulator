@@ -88,6 +88,12 @@ Emulator::Emulator() {
     m_TimerCounter = CLOCKSPEED / frequency;
     m_DividerCounter = 0;
     m_DividerRegister = 0;
+
+    // initialize interrupts
+    m_InterruptMaster = true;
+
+    // initialize scanline
+    m_ScanlineCounter = 0;
 }
 
 /**
@@ -138,6 +144,10 @@ void Emulator::WriteMemory(WORD address, BYTE data) {
     } else if(0xFF04 == address) {
         // trap the divider register
         m_Rom[0xFF04] = 0;
+    } else if(address == 0xFF44) {
+        m_Rom[address] = 0;
+    } else if(address == 0xFF46) {
+        DoDMATransfer(data);
     } else {
         m_Rom[address] = data;
     }
@@ -314,10 +324,196 @@ void Emulator::SetClockFreq() {
     }
 }
 
+/**
+ * Divider register
+ */
 void Emulator::DoDividerRegister(int cycles) {
     m_DividerRegister += cycles;
     if(m_DividerCounter >= 255) {
         m_DividerCounter = 0;
         m_Rom[0xFF04]++;
+    }
+}
+
+/**
+ * Helper function for setting a bit
+ */
+BYTE BitSet(BYTE byte, int position) {
+    if(position < 0 || position > 7) {
+        return byte;
+    }
+    return byte | (1 << position);
+}
+
+/**
+ * Requesting an interrupt
+ */
+void Emulator::RequestInterrupt(int id) {
+    BYTE req = ReadMemory(0xFF0F);
+    req = BitSet(req, id);
+    WriteMemory(0xFF0F, id);
+}
+
+/**
+ * Iterate through interrupts in memory and service them
+ */
+void Emulator::DoInterrupts() {
+    if(m_InterruptMaster == true) {
+        BYTE req = ReadMemory(0xFF0F);
+        BYTE enabled = ReadMemory(0xFFFF);
+        if(req > 0) {
+            for(int i = 0; i < 5; i++) {
+                if(TestBit(req, i) == true) {
+                    if(TestBit(enabled, i))
+                        ServiceInterrupt(i);
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Helper function for resetting a bit
+ */
+BYTE BitReset(BYTE byte, int position) {
+    if(position < 0 || position > 7) {
+        return byte;
+    }
+    return byte & ~(1 << position);
+}
+
+/**
+ * Process the current interrupt
+ */
+// void Emulator::ServiceInterrupt(int interrupt) {
+//     m_InterruptMaster = false;
+//     BYTE req = ReadMemory(0xFF0F);
+//     req = BitReset(req, interrupt);
+//     WriteMemory(0xFF0F, req);
+
+//     // we must save the current execution address by pushing it onto the stack
+//     PushWordOntoStack(m_ProgramCounter);
+
+//     switch(interrupt) {
+//         case 0: m_ProgramCounter = 0x40; break;
+//         case 1: m_ProgramCounter = 0x48; break;
+//         case 2: m_ProgramCounter = 0x50; break;
+//         case 4: m_ProgramCounter = 0x60; break;
+//     }
+// }
+
+/**
+ * Update the graphics
+ */
+// void Emulator::UpdateGraphics(int cycles) {
+//     SetLCDStatus();
+
+//     if(IsLCDEnabled())
+//         m_ScanlineCounter -= cycles;
+//     else
+//         return;
+
+//     if(m_ScanlineCounter <= 0) {
+//         // move onto the next scanline
+//         m_Rom[0xFF44]++;
+//         BYTE currentLine = ReadMemory(0xFF44);
+
+//         m_ScanlineCounter = 456;
+
+        
+//         if(currentLine == 144)
+//             // we have entered vertical blank period
+//             RequestInterrupt(0);
+//         else if(currentLine > 153)
+//             // if gone past scanline 153 reset to 0
+//             m_Rom[0xFF44] = 0;
+//         else if(currentLine < 144)
+//             // draw the current scan line
+//             DrawScanLine();
+//     }
+// }
+
+/**
+ * Set LCD status
+ */
+void Emulator::SetLCDStatus() {
+    BYTE status = ReadMemory(0xFF41);
+    if(false == IsClockEnabled()) {
+        // set the mode to 1 during lcd disabled and reset scanline
+        m_ScanlineCounter = 456;
+        m_Rom[0xFF44] = 0;
+        status &= 252;
+        status = BitSet(status, 0);
+        WriteMemory(0xFF41, status);
+        return;
+    }
+
+    BYTE currentLine = ReadMemory(0xFF44);
+    BYTE currentMode = status & 0x3;
+
+    BYTE mode = 0;
+    bool reqInt = false;
+
+    // in vblank so set mode to 1
+    if(currentLine >= 144) {
+        mode = 1;
+        status = BitSet(status, 0);
+        status = BitReset(status, 1);
+        reqInt = TestBit(status, 4);
+    } else {
+        int mode2bounds = 456 - 80;
+        int mode3bounds = mode2bounds - 172;
+
+        if(m_ScanlineCounter >= mode2bounds) {
+            // mode 2
+            mode = 2;
+            status = BitSet(status, 1);
+            status = BitReset(status, 0);
+            reqInt = TestBit(status, 5);
+        } else if(m_ScanlineCounter >= mode3bounds) {
+            // mode 3
+            mode = 3;
+            status = BitSet(status, 1);
+            status = BitSet(status, 0);
+        } else {
+            // mode 0
+            mode = 0;
+            status = BitReset(status, 1);
+            status = BitReset(status, 0);
+            reqInt = TestBit(status, 3);
+        }
+    }
+
+    // just entered a mnew mode so request interrupt
+    if(reqInt && (mode != currentMode))
+        RequestInterrupt(1);
+    
+    // check coincidence flag
+    BYTE ly = ReadMemory(0xFF44);
+    if(ly == ReadMemory(0xFF45)) {
+        status = BitSet(status, 2);
+        if(TestBit(status, 6))
+            RequestInterrupt(1);
+    } else {
+        status = BitReset(status, 2);
+    }
+
+    WriteMemory(0xFF41, status);
+}
+
+/**
+ * Check if LCD is enabled
+ */
+bool Emulator::IsLCDEnabled() const {
+    return TestBit(ReadMemory(0xFF40), 7);
+}
+
+/**
+ * DMA transfer
+ */
+void Emulator::DoDMATransfer(BYTE data) {
+    WORD address = data << 8; // source address is data * 100
+    for(int i = 0; i < 0xA0; i++) {
+        WriteMemory(0xFE00 + i, ReadMemory(address + i));
     }
 }

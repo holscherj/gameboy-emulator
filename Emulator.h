@@ -9,6 +9,15 @@ typedef signed short SIGNED_WORD;
 
 class Emulator {
     public:
+        // color
+        enum COLOR {
+            WHITE,
+            LIGHT_GRAY,
+            DARK_GRAY,
+            BLACK
+        };
+
+        // methods
         Emulator();
         void Update();
         void WriteMemory(WORD address, BYTE data);
@@ -31,6 +40,10 @@ class Emulator {
         void SetLCDStatus();
         bool IsLCDEnabled() const;
         void DoDMATransfer(BYTE data);
+        void DrawScanLine();
+        void RenderTiles(BYTE lcdControl);
+        void RenderSprites(BYTE lcdControl);
+        COLOR GetColor(BYTE colorNum, WORD address) const;
         ~Emulator() = default;
 
         // game cartridge memory
@@ -81,8 +94,6 @@ class Emulator {
 
         // scanlines
         int m_ScanlineCounter;
-
-    private:
 };
 
 #endif
